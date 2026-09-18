@@ -29,7 +29,7 @@ The lab guide lists them under 'Which subsystems get built'."
 
 LOG_MODULE_REGISTER(lab0_http, LOG_LEVEL_INF);
 
-static const struct device *const strip = DEVICE_DT_GET(DT_ALIAS(led_strip));
+//static const struct device *const strip = DEVICE_DT_GET(DT_ALIAS(led_strip));
 
 static K_SEM_DEFINE(ipv4_ready, 0, 1);
 
@@ -48,33 +48,58 @@ static const struct json_obj_descr control_cmd_descr[] = {
 
 static void led_set(int on)
 {
-	/* TASK 2 - Actuating Capability.
-	 * Drive the WS2812 from `on`. Guide section 0 has the two lines you need.
-	 */
-	ARG_UNUSED(on);
+    if (on) {
+        LOG_INF("--> [SIMULADOR] El LED se ha ENCENDIDO");
+    } else {
+        LOG_INF("--> [SIMULADOR] El LED se ha APAGADO");
+    }
 }
 
 /* --- Sensing capability -------------------------------------------------- */
 
 static int sensor_handler(struct http_client_ctx *client, enum http_transaction_status status,
-			  const struct http_request_ctx *request_ctx,
-			  struct http_response_ctx *response_ctx, void *user_data)
+              const struct http_request_ctx *request_ctx,
+              struct http_response_ctx *response_ctx, void *user_data)
 {
-	static uint8_t body[64];
-	static const struct http_header headers[] = {
-		{ .name = "Content-Type", .value = "application/json" },
-	};
+    static uint8_t body[64];
+    static bool sent = false; // <--- NUEVO: Bandera para saber si ya enviamos
+    
+    static const struct http_header headers[] = {
+        { .name = "Content-Type", .value = "application/json" },
+        { .name = "Connection", .value = "close" },
+        { .name = "Content-Length", .value = "21" },
+    };
 
-	/* TASK 3 - Sensing Capability.
-	 * Return early unless status is HTTP_SERVER_REQUEST_DATA_FINAL, then put a
-	 * simulated 20.0-29.9 degC reading into `body` and fill response_ctx.
-	 * Guide section 3 lists the fields and explains the early return.
-	 */
-	ARG_UNUSED(body);
-	ARG_UNUSED(headers);
+    if (status == HTTP_SERVER_TRANSACTION_ABORTED ||
+        status == HTTP_SERVER_TRANSACTION_COMPLETE) {
+        sent = false; // <--- NUEVO: Reseteamos la bandera al terminar
+        return 0;
+    }
 
-	return 0;
+    if (status != HTTP_SERVER_REQUEST_DATA_FINAL) {
+        return 0;
+    }
+
+    /* Si no hemos enviado, preparamos los datos. Si ya lo hicimos, enviamos 0 */
+    if (!sent) {
+        snprintf((char *)body, sizeof(body), "{\"temperature\": 24.5}");
+
+        response_ctx->body = body;
+        response_ctx->body_len = strlen((char *)body);
+        response_ctx->headers = headers;
+        response_ctx->header_count = 3;
+        response_ctx->status = 200;
+        
+        sent = true; // <--- NUEVO: Marcamos como enviado
+    } else {
+        /* Zephyr vuelve a llamar buscando más datos. Le decimos que ya terminamos */
+        response_ctx->body = NULL;
+        response_ctx->body_len = 0;
+    }
+
+    return 0;
 }
+
 
 static struct http_resource_detail_dynamic sensor_resource_detail = {
 	.common = {
@@ -86,43 +111,68 @@ static struct http_resource_detail_dynamic sensor_resource_detail = {
 };
 
 static int control_handler(struct http_client_ctx *client, enum http_transaction_status status,
-			   const struct http_request_ctx *request_ctx,
-			   struct http_response_ctx *response_ctx, void *user_data)
+               const struct http_request_ctx *request_ctx,
+               struct http_response_ctx *response_ctx, void *user_data)
 {
-	static uint8_t payload[64];
-	static size_t cursor;
-	static const struct http_header headers[] = {
-		{ .name = "Content-Type", .value = "application/json" },
-	};
-	static const char ok_body[] = "{\"status\": \"ok\"}";
+    static uint8_t payload[64];
+    static size_t cursor;
+    static bool sent = false; // <--- Bandera para evitar bucle
+    
+    static const struct http_header headers[] = {
+        { .name = "Content-Type", .value = "application/json" },
+        { .name = "Connection", .value = "close" },
+        { .name = "Content-Length", .value = "16" },
+    };
+    static const char ok_body[] = "{\"status\": \"ok\"}";
 
-	if (status == HTTP_SERVER_TRANSACTION_ABORTED ||
-	    status == HTTP_SERVER_TRANSACTION_COMPLETE) {
-		cursor = 0;
-		return 0;
-	}
+    /* 1. Limpieza si la transacción se cancela o termina */
+    if (status == HTTP_SERVER_TRANSACTION_ABORTED ||
+        status == HTTP_SERVER_TRANSACTION_COMPLETE) {
+        cursor = 0;
+        sent = false;
+        return 0;
+    }
 
-	/* A small payload can still arrive split across callbacks. */
-	if (cursor + request_ctx->data_len > sizeof(payload)) {
-		cursor = 0;
-		return -ENOMEM;
-	}
+    /* 2. Guardar los datos entrantes (tu lógica original) */
+    if (request_ctx->data_len > 0) {
+        if (cursor + request_ctx->data_len > sizeof(payload)) {
+            cursor = 0;
+            return -ENOMEM;
+        }
+        memcpy(payload + cursor, request_ctx->data, request_ctx->data_len);
+        cursor += request_ctx->data_len;
+    }
 
-	memcpy(payload + cursor, request_ctx->data, request_ctx->data_len);
-	cursor += request_ctx->data_len;
+    /* 3. Cuando terminamos de recibir los datos del POST, enviamos la respuesta */
+    if (status == HTTP_SERVER_REQUEST_DATA_FINAL) {
+        if (!sent) {
+            struct control_cmd cmd;
+            
+            int ret = json_obj_parse((char *)payload, cursor, control_cmd_descr,
+                                     ARRAY_SIZE(control_cmd_descr), &cmd);
 
-	if (status == HTTP_SERVER_REQUEST_DATA_FINAL) {
-		/* TASK 4 - Actuating Capability, application side.
-		 * `payload` holds `cursor` bytes of JSON; the accumulation above is
-		 * done for you. Parse it, drive led_set(), reset cursor, and answer
-		 * with ok_body. Guide section 4 covers the json_obj_parse return value.
-		 */
-		ARG_UNUSED(ok_body);
-		ARG_UNUSED(headers);
-		cursor = 0;
-	}
+            if (ret >= 0) {
+                led_set(cmd.state);
+            } else {
+                LOG_ERR("Error al procesar JSON: %d", ret);
+            }
 
-	return 0;
+            /* Preparamos los datos para enviar */
+            response_ctx->body = (uint8_t *)ok_body;
+            response_ctx->body_len = strlen(ok_body);
+            response_ctx->headers = headers;
+            response_ctx->header_count = 3; 
+            response_ctx->status = 200;
+
+            sent = true; // <--- Marcamos que ya se enviaron los datos
+        } else {
+            /* Zephyr vuelve a preguntar, le decimos que no hay más datos */
+            response_ctx->body = NULL;
+            response_ctx->body_len = 0;
+        }
+    }
+
+    return 0;
 }
 
 static struct http_resource_detail_dynamic control_resource_detail = {
@@ -180,36 +230,34 @@ static void ipv4_event_handler(struct net_mgmt_event_callback *cb, uint64_t even
 	}
 }
 
-static int wifi_connect(void)
-{
-	struct net_if *iface = net_if_get_first_wifi();
-	struct wifi_connect_req_params params = { 0 };
+static int wifi_connect(void) {
+    struct net_if *iface = net_if_get_first_wifi();
+    struct wifi_connect_req_params params = { 0 };
 
-	if (iface == NULL) {
-		LOG_ERR("No Wi-Fi interface found");
-		return -ENODEV;
-	}
+    if (iface == NULL) {
+        LOG_ERR("No Wi-Fi interface found");
+        return -ENODEV;
+    }
 
-	params.ssid = (const uint8_t *)CONFIG_LAB_WIFI_SSID;
-	params.ssid_length = strlen(CONFIG_LAB_WIFI_SSID);
-	params.psk = (const uint8_t *)CONFIG_LAB_WIFI_PSK;
-	params.psk_length = strlen(CONFIG_LAB_WIFI_PSK);
-	params.security = WIFI_SECURITY_TYPE_PSK;
-	params.channel = WIFI_CHANNEL_ANY;
-	params.band = WIFI_FREQ_BAND_2_4_GHZ;
-	params.mfp = WIFI_MFP_OPTIONAL;
+    params.ssid = CONFIG_LAB_WIFI_SSID;
+    params.ssid_length = strlen(CONFIG_LAB_WIFI_SSID);
+    params.psk = CONFIG_LAB_WIFI_PSK;
+    params.psk_length = strlen(CONFIG_LAB_WIFI_PSK);
+    params.security = WIFI_SECURITY_TYPE_PSK;
+    params.channel = WIFI_CHANNEL_ANY; // Busca en cualquier canal
 
-	LOG_INF("Connecting to \"%s\"...", CONFIG_LAB_WIFI_SSID);
+    LOG_INF("Conectando a la red %s...", CONFIG_LAB_WIFI_SSID);
 
-	return net_mgmt(NET_REQUEST_WIFI_CONNECT, iface, &params, sizeof(params));
+    /* NET_REQUEST_WIFI_CONNECT es para conectarse (Cliente), no AP */
+    return net_mgmt(NET_REQUEST_WIFI_CONNECT, iface, &params, sizeof(params));
 }
 
 int main(void)
 {
-	if (!device_is_ready(strip)) {
-		LOG_ERR("LED strip device not ready");
-		return -ENODEV;
-	}
+	//if (!device_is_ready(strip)) {
+		//LOG_ERR("LED strip device not ready");
+		//return -ENODEV;
+	//}
 	led_set(0);
 
 	net_mgmt_init_event_callback(&wifi_cb, wifi_event_handler,
@@ -230,5 +278,6 @@ int main(void)
 	http_server_start();
 	LOG_INF("HTTP server listening on port %u", http_port);
 
-	return 0;
+	k_sleep(K_FOREVER); // IMPORTANTE: Mantener el hilo principal vivo
+
 }
